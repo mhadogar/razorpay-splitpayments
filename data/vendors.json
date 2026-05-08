@@ -1,0 +1,142 @@
+{
+  "vendors": [
+    {
+      "vendorId": "vendor-001",
+      "vtexSellerId": "1",
+      "accountId": "",
+      "email": "seller1@example.com",
+      "phone": 919999999999,
+      "legalBusinessName": "Seller One Pvt Ltd",
+      "businessType": "partnership",
+      "referenceId": "seller-001",
+      "profile": {
+        "category": "food",
+        "subcategory": "coffee",
+        "addresses": {
+          "registered": {
+            "street1": "MG Road",
+            "street2": "Central",
+            "city": "Bengaluru",
+            "state": "Karnataka",
+            "postal_code": "560001",
+            "country": "IN"
+          }
+        }
+      }
+    },
+    {
+      "vendorId": "vendor-002",
+      "vtexSellerId": "2",
+      "accountId": "",
+      "email": "seller2@example.com",
+      "phone": 918888888888,
+      "legalBusinessName": "Seller Two LLP",
+      "businessType": "partnership",
+      "referenceId": "seller-002",
+      "profile": {
+        "category": "food",
+        "subcategory": "beverages",
+        "addresses": {
+          "registered": {
+            "street1": "Brigade Road",
+            "street2": "South",
+            "city": "Mumbai",
+            "state": "Maharashtra",
+            "postal_code": "400001",
+            "country": "IN"
+          }
+        }
+      }
+    },
+    {
+      "vendorId": "vendor_juanvaldezcoffee502",
+      "vtexSellerId": "juanvaldezcoffee502",
+      "linkedAccountAlias": "acc_juanvaldezcoffee502",
+      "accountId": "",
+      "email": "juanvaldezcoffee502@coffeesooq.local",
+      "phone": 9100001843,
+      "legalBusinessName": "Seller juanvaldezcoffee502",
+      "businessType": "proprietorship",
+      "referenceId": "acc_juanvaldezcoffee502",
+      "profile": {
+        "category": "ecommerce",
+        "subcategory": "marketplace",
+        "addresses": {
+          "registered": {
+            "street1": "NA",
+            "street2": "NA",
+            "city": "NA",
+            "state": "NA",
+            "postal_code": "560001",
+            "country": "IN"
+          }
+        }
+      }
+    },
+    {
+      "vendorId": "vendor_bilihu489",
+      "vtexSellerId": "bilihu489",
+      "linkedAccountAlias": "acc_bilihu489",
+      "accountId": "",
+      "email": "bilihu489@coffeesooq.local",
+      "phone": 9100000802,
+      "legalBusinessName": "Seller bilihu489",
+      "businessType": "proprietorship",
+      "referenceId": "acc_bilihu489",
+      "profile": {
+        "category": "ecommerce",
+        "subcategory": "marketplace",
+        "addresses": {
+          "registered": {
+            "street1": "NA",
+            "street2": "NA",
+            "city": "NA",
+            "state": "NA",
+            "postal_code": "560001",
+            "country": "IN"
+          }
+        }
+      }
+    },
+    {
+      "vendorId": "vendor_fivefarms479",
+      "vtexSellerId": "fivefarms479",
+      "linkedAccountAlias": "acc_fivefarms479",
+      "accountId": "",
+      "email": "fivefarms479@coffeesooq.local",
+      "phone": 9100001127,
+      "legalBusinessName": "Seller fivefarms479",
+      "businessType": "proprietorship",
+      "referenceId": "acc_fivefarms479",
+      "profile": {
+        "category": "ecommerce",
+        "subcategory": "marketplace",
+        "addresses": {
+          "registered": {
+            "street1": "NA",
+            "street2": "NA",
+            "city": "NA",
+            "state": "NA",
+            "postal_code": "560001",
+            "country": "IN"
+          }
+        }
+      }
+    }
+  ],
+  "orderSplits": [
+    {
+      "orderId": "order_ABC123",
+      "splits": [
+        {
+          "vendorId": "vendor-001",
+          "sharePercent": 60
+        },
+        {
+          "vendorId": "vendor-002",
+          "sharePercent": 30
+        }
+      ]
+    }
+  ]
+}

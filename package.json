@@ -1,0 +1,26 @@
+{
+  "name": "razorpaysplitpayments",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:once": "RUN_ONCE=true node src/index.js",
+    "test:fetch-payments": "node src/fetchPaymentsOnly.js",
+    "test:vtex-order": "node src/testVtexOrder.js",
+    "portal:start": "node src/portalServer.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "multer": "^2.1.1",
+    "node-cron": "^4.2.1",
+    "razorpay": "^2.9.6",
+    "xlsx": "^0.18.5"
+  }
+}
