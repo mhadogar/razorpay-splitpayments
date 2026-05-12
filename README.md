@@ -1,6 +1,7 @@
 # CoffeeSooq Razorpay Split Scheduler
 
-**Full documentation (plain language + technical):** see [DOCUMENTATION.md](./DOCUMENTATION.md).
+**For managers (executive brief):** [MANAGER_BRIEF.md](./MANAGER_BRIEF.md)  
+**Full documentation (plain language + technical):** [DOCUMENTATION.md](./DOCUMENTATION.md)
 
 Node.js scheduler that:
 

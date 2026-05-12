@@ -1,5 +1,7 @@
 # CoffeeSooq Razorpay Split Payments — Full Documentation
 
+**For management (executive brief):** see [MANAGER_BRIEF.md](./MANAGER_BRIEF.md).
+
 This document has two parts:
 
 - **[Part 1 — Plain language](#part-1-plain-language-for-business-and-operations)** for anyone who needs to understand *what* the system does without reading code.
