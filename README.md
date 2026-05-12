@@ -1,5 +1,7 @@
 # CoffeeSooq Razorpay Split Scheduler
 
+**Full documentation (plain language + technical):** see [DOCUMENTATION.md](./DOCUMENTATION.md).
+
 Node.js scheduler that:
 
 1. Fetches captured payments from Razorpay.
