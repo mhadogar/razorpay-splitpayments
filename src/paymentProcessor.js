@@ -74,6 +74,10 @@ function extractVtexOrderId(payment) {
   return payment.notes?.vtexOrderId || payment.notes?.vtex_order_id || null;
 }
 
+function getOrderItems(vtexOrder) {
+  return Array.isArray(vtexOrder?.items) ? vtexOrder.items : [];
+}
+
 function getItemTotal(item) {
   if (item?.priceDefinition && Number.isFinite(item.priceDefinition.total)) {
     return Math.floor(item.priceDefinition.total);
@@ -86,6 +90,95 @@ function getItemTotal(item) {
   }
 
   return 0;
+}
+
+function getTotalFromVtexTotals(vtexOrder, totalId) {
+  const totals = Array.isArray(vtexOrder?.totals) ? vtexOrder.totals : [];
+  const entry = totals.find((t) => String(t.id || "").toLowerCase() === String(totalId).toLowerCase());
+  if (!entry || !Number.isFinite(entry.value)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(entry.value));
+}
+
+/** Product subtotals per seller (excludes shipping). */
+function getSellerProductSubtotals(vtexOrder) {
+  const productBySeller = new Map();
+  for (const item of getOrderItems(vtexOrder)) {
+    const sellerId = item?.seller;
+    if (!sellerId) {
+      continue;
+    }
+    const lineTotal = getItemTotal(item);
+    if (lineTotal <= 0) {
+      continue;
+    }
+    const key = String(sellerId);
+    productBySeller.set(key, (productBySeller.get(key) || 0) + lineTotal);
+  }
+  return productBySeller;
+}
+
+/**
+ * Shipping per seller from VTEX logisticsInfo (for reporting; not transferred to seller).
+ */
+function getSellerShippingFromLogistics(vtexOrder) {
+  const items = getOrderItems(vtexOrder);
+  const logistics = vtexOrder?.shippingData?.logisticsInfo;
+  if (!Array.isArray(logistics) || logistics.length === 0) {
+    return null;
+  }
+
+  const bySeller = new Map();
+  for (const info of logistics) {
+    const price = Number.isFinite(info?.price) ? Math.floor(info.price) : 0;
+    if (price <= 0) {
+      continue;
+    }
+    const item = items[info.itemIndex];
+    const sellerId = item?.seller ? String(item.seller) : null;
+    if (!sellerId) {
+      continue;
+    }
+    bySeller.set(sellerId, (bySeller.get(sellerId) || 0) + price);
+  }
+  return bySeller.size > 0 ? bySeller : null;
+}
+
+function allocateShippingProportionally(productBySeller, totalShipping) {
+  const bySeller = new Map();
+  if (totalShipping <= 0 || productBySeller.size === 0) {
+    return bySeller;
+  }
+
+  const productSum = [...productBySeller.values()].reduce((sum, value) => sum + value, 0);
+  if (productSum <= 0) {
+    return bySeller;
+  }
+
+  const entries = [...productBySeller.entries()];
+  let allocated = 0;
+  for (let index = 0; index < entries.length; index += 1) {
+    const [sellerId, productAmount] = entries[index];
+    const share =
+      index === entries.length - 1
+        ? totalShipping - allocated
+        : Math.floor((totalShipping * productAmount) / productSum);
+    allocated += share;
+    if (share > 0) {
+      bySeller.set(sellerId, share);
+    }
+  }
+  return bySeller;
+}
+
+function getSellerShippingDeductions(vtexOrder, productBySeller) {
+  const fromLogistics = getSellerShippingFromLogistics(vtexOrder);
+  if (fromLogistics) {
+    return fromLogistics;
+  }
+  const orderShipping = getTotalFromVtexTotals(vtexOrder, "Shipping");
+  return allocateShippingProportionally(productBySeller, orderShipping);
 }
 
 function buildSplitsFromVtexOrder(vtexOrder, sellerVendorMap) {
@@ -119,28 +212,26 @@ function buildSplitsFromVtexOrder(vtexOrder, sellerVendorMap) {
 }
 
 function summarizeVtexSellers(vtexOrder) {
-  const items = Array.isArray(vtexOrder.items) ? vtexOrder.items : [];
-  const sellerAmounts = new Map();
+  const productBySeller = getSellerProductSubtotals(vtexOrder);
+  const shippingBySeller = getSellerShippingDeductions(vtexOrder, productBySeller);
+  const sellerIds = new Set([...productBySeller.keys(), ...shippingBySeller.keys()]);
 
-  for (const item of items) {
-    const sellerId = item?.seller;
-    if (!sellerId) {
-      continue;
-    }
-    const total = getItemTotal(item);
-    if (total <= 0) {
-      continue;
-    }
-    const current = sellerAmounts.get(String(sellerId)) || 0;
-    sellerAmounts.set(String(sellerId), current + total);
-  }
-
-  return Array.from(sellerAmounts.entries()).map(([sellerId, amount]) => ({
-    sellerId,
-    amount,
-  }));
+  return Array.from(sellerIds)
+    .map((sellerId) => ({
+      sellerId,
+      /** Product/subtotal amount for this seller (paise); basis for share/GST. */
+      amount: productBySeller.get(sellerId) || 0,
+      /** Shipping on this seller's lines — retained by marketplace (not in seller transfer). */
+      shippingAttribution: shippingBySeller.get(sellerId) || 0,
+    }))
+    .filter((row) => row.amount > 0);
 }
 
+/**
+ * Settlement on product subtotal only (shipping excluded).
+ * Example: products 1000, seller share 75%, GST 0 → sellerNet 750; marketplace product commission 250.
+ * Shipping (e.g. 100) is not transferred to seller and stays on the main account with commission.
+ */
 function calculateSellerSettlement({
   sellerOrderAmount,
   sellerSharePercent,
@@ -151,9 +242,9 @@ function calculateSellerSettlement({
   const sellerGst = calculateAmountFromPercent(sellerGross, sellerGstPercent);
   const sellerNet = Math.max(0, sellerGross - sellerGst);
 
-  const marketplaceGross = Math.max(0, sellerOrderAmount - sellerGross);
-  const marketplaceGst = calculateAmountFromPercent(marketplaceGross, marketplaceGstPercent);
-  const marketplaceNet = Math.max(0, marketplaceGross - marketplaceGst);
+  const marketplaceCommissionOnProducts = Math.max(0, sellerOrderAmount - sellerGross);
+  const marketplaceGst = calculateAmountFromPercent(marketplaceCommissionOnProducts, marketplaceGstPercent);
+  const marketplaceNetOnProducts = Math.max(0, marketplaceCommissionOnProducts - marketplaceGst);
 
   return {
     sellerSharePercent,
@@ -162,10 +253,19 @@ function calculateSellerSettlement({
     sellerGross,
     sellerGst,
     sellerNet,
-    marketplaceGross,
+    marketplaceGross: marketplaceCommissionOnProducts,
     marketplaceGst,
-    marketplaceNet,
+    marketplaceNet: marketplaceNetOnProducts,
+    marketplaceCommissionOnProducts,
   };
+}
+
+function getOrderShippingTotal(vtexOrder, productBySeller) {
+  const fromLogistics = getSellerShippingFromLogistics(vtexOrder);
+  if (fromLogistics) {
+    return [...fromLogistics.values()].reduce((sum, value) => sum + value, 0);
+  }
+  return getTotalFromVtexTotals(vtexOrder, "Shipping");
 }
 
 async function persistVendorPayload(filePath, payload) {
@@ -319,18 +419,25 @@ async function processPayments({
           order: vtexOrder,
         });
         const sellerSummary = summarizeVtexSellers(vtexOrder);
+        const productBySeller = getSellerProductSubtotals(vtexOrder);
+        const orderProductTotal = [...productBySeller.values()].reduce((sum, value) => sum + value, 0);
+        const orderShippingTotal = getOrderShippingTotal(vtexOrder, productBySeller);
         logger.info("Fetched VTEX seller details", {
           paymentId: payment.id,
           vtexOrderId,
           sellerSummary,
+          orderProductTotal,
+          orderShippingTotal,
+          paymentAmount: payment.amount,
         });
         const transfers = [];
         let totalSellerTransferAmount = 0;
 
         for (const seller of sellerSummary) {
           const sellerId = String(seller.sellerId);
-          const sellerOrderAmount = toNumber(seller.amount, 0);
-          if (sellerOrderAmount <= 0) {
+          const productSubtotal = toNumber(seller.amount, 0);
+          const shippingAttribution = toNumber(seller.shippingAttribution, 0);
+          if (productSubtotal <= 0) {
             continue;
           }
 
@@ -468,33 +575,40 @@ async function processPayments({
 
           const linkedAccount = await razorpay.fetchLinkedAccount(accountId);
           const breakdown = calculateSellerSettlement({
-            sellerOrderAmount,
+            sellerOrderAmount: productSubtotal,
             sellerSharePercent,
             sellerGstPercent,
             marketplaceGstPercent,
           });
 
-          if (breakdown.sellerNet < config.settlement.minimumTransferAmount) {
-            logger.warn("Seller transfer amount below minimum after GST deduction", {
+          const sellerTransferAmount = breakdown.sellerNet;
+
+          if (sellerTransferAmount < config.settlement.minimumTransferAmount) {
+            logger.warn("Seller transfer amount below minimum after product commission and GST", {
               sellerId,
-              sellerNet: breakdown.sellerNet,
+              productSubtotal,
+              shippingAttribution,
+              sellerTransferAmount,
+              marketplaceCommissionOnProducts: breakdown.marketplaceCommissionOnProducts,
             });
             continue;
           }
 
-          totalSellerTransferAmount += breakdown.sellerNet;
+          totalSellerTransferAmount += sellerTransferAmount;
           transfers.push({
             account: linkedAccount.id,
-            amount: breakdown.sellerNet,
+            amount: sellerTransferAmount,
             currency: config.settlement.currency,
             notes: {
               payment_id: payment.id,
               order_id: payment.order_id,
               seller_id: sellerId,
+              product_subtotal: String(productSubtotal),
+              shipping_attribution: String(shippingAttribution),
               seller_share_percent: String(breakdown.sellerSharePercent),
               seller_gst_percent: String(breakdown.sellerGstPercent),
               seller_gst_amount: String(breakdown.sellerGst),
-              marketplace_commission_amount: String(breakdown.marketplaceGross),
+              marketplace_commission_on_products: String(breakdown.marketplaceCommissionOnProducts),
               marketplace_gst_percent: String(breakdown.marketplaceGstPercent),
               marketplace_gst_amount: String(breakdown.marketplaceGst),
             },
@@ -502,6 +616,7 @@ async function processPayments({
               "payment_id",
               "order_id",
               "seller_id",
+              "product_subtotal",
               "seller_share_percent",
               "seller_gst_amount",
             ],
@@ -523,19 +638,24 @@ async function processPayments({
           continue;
         }
 
-        const commission = payment.amount - totalSellerTransferAmount;
+        const marketplaceRetained = payment.amount - totalSellerTransferAmount;
         logger.info("Creating seller transfers from payment", {
           paymentId: payment.id,
           sellerCount: transfers.length,
+          orderProductTotal,
+          orderShippingTotal,
           totalSellerTransferAmount,
-          marketplaceCommissionAfterGST: commission,
+          marketplaceRetained,
+          note: "marketplaceRetained includes product commission + shipping (+ GST on commission if configured)",
         });
         const transferRes = await razorpay.createTransferFromPayment(payment.id, transfers);
         state.transferredPayments[payment.id] = {
           transferredAt: new Date().toISOString(),
           orderId: payment.order_id,
           sellerCount: transfers.length,
-          commission,
+          marketplaceRetained,
+          orderProductTotal,
+          orderShippingTotal,
           transferResponse: transferRes,
         };
 
@@ -567,4 +687,9 @@ async function processPayments({
   return state;
 }
 
-module.exports = { processPayments };
+module.exports = {
+  processPayments,
+  summarizeVtexSellers,
+  getSellerProductSubtotals,
+  getSellerShippingDeductions,
+};

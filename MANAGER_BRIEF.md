@@ -27,7 +27,7 @@ CoffeeSooq receives customer payments through Razorpay for marketplace orders th
 
 - Pulls eligible **captured** payments from Razorpay within a defined **time window**.
 - Applies a **hold** (days after payment) before treating a payment as ready for settlement logic.
-- When VTEX is enabled: uses the **VTEX order** linked from the payment to determine **per-seller amounts** from line items.
+- When VTEX is enabled: uses the **VTEX order** linked from the payment to determine **per-seller amounts from product subtotals only**; **shipping** attributed to each seller is **deducted** from their payout (marketplace retains it, as CoffeeSooq funds shipping).
 - Ensures **Razorpay linked accounts** exist for sellers (creation when missing, using KYC and bank data where provided).
 - Applies **GST and share** rules per seller configuration (defaults from environment where not overridden).
 - Records completed work to **avoid duplicate transfers** for the same payment.

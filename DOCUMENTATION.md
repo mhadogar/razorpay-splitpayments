@@ -107,11 +107,25 @@ Two separate Node processes are typical in production:
 1. **Time window**: Payments are queried with `from` / `to` derived from `PAYMENT_WINDOW_FROM_DAYS_AGO` and `PAYMENT_WINDOW_TO_DAYS_AGO` (see `src/config.js` and `src/paymentProcessor.js`).
 2. **Eligibility**: Only **captured** payments (`status === "captured"` and `captured === true`) are considered; `order_id` may be required depending on path; **hold** uses `HOLD_DAYS` (minimum 15 enforced in config when set).
 3. **Idempotency**: `data/state.json` records transferred payment IDs to avoid duplicate transfer attempts.
-4. **VTEX path**: Reads `notes.vtexOrderId` (or `vtex_order_id`), fetches order; `vtexClient` may retry with `-01` suffix on 404; `summarizeVtexSellers` aggregates amounts per seller from items.
-5. **Seller resolution**: Master Data (`getSellerKycBySellerId`, `upsertSellerKyc`) with fallback XLSX (`vendorExcelRepository.js`).
-6. **Linked accounts**: `linkedAccountService.ensureLinkedAccount` — fetch by `accountId` or create with KYC + optional `bank_account` payload.
-7. **GST / shares**: `calculateSellerSettlement` uses seller share % and GST % fields from Master Data or Excel vs defaults from env.
-8. **Transfers**: `razorpayClient.createTransferFromPayment` with per-seller transfer lines and notes.
+4. **VTEX path**: Reads `notes.vtexOrderId` (or `vtex_order_id`), fetches order; `vtexClient` may retry with `-01` suffix on 404; `summarizeVtexSellers` aggregates **product subtotals** per seller (line items only, not shipping).
+5. **Shipping**: Shipping is **not** included in the seller payout base. Only **product subtotal** is used for commission/seller share. Shipping stays on the **marketplace** account (CoffeeSooq funds shipping).
+
+**Example (amounts in smallest currency unit, e.g. paise):**
+
+| Component | Amount |
+|-----------|--------|
+| Customer pays (Razorpay) | 1100 |
+| Products | 1000 |
+| Shipping | 100 |
+| Marketplace commission on products (25%) | 250 |
+| **Transfer to seller** | **750** (75% of 1000, after GST if any) |
+| **Stays on marketplace** | **350** (250 commission + 100 shipping) |
+
+Set **Seller Share %** to `75` when marketplace commission is 25% (or configure per seller in Master Data / Excel).
+6. **Seller resolution**: Master Data (`getSellerKycBySellerId`, `upsertSellerKyc`) with fallback XLSX (`vendorExcelRepository.js`).
+7. **Linked accounts**: `linkedAccountService.ensureLinkedAccount` — fetch by `accountId` or create with KYC + optional `bank_account` payload.
+8. **GST / shares**: `calculateSellerSettlement` uses **product subtotal** and seller share % / GST % from Master Data or Excel vs defaults from env.
+9. **Transfers**: `razorpayClient.createTransferFromPayment` with per-seller transfer lines; transfer amount = seller net after GST **minus** shipping deduction.
 
 ### Environment variables
 
