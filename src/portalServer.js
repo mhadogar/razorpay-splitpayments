@@ -8,6 +8,7 @@ const cron = require("node-cron");
 const config = require("./config");
 const logger = require("./logger");
 const { createVtexMasterdataClient } = require("./vtexMasterdataClient");
+const { loadVendorsByReferenceId } = require("./vendorExcelRepository");
 const { runCycle } = require("./index");
 
 function renderForm() {
@@ -185,7 +186,21 @@ function renderEnvManagementPage() {
 </html>`;
 }
 
-function renderXlsxUploadPage() {
+function renderXlsxUploadPage(status = {}) {
+  const successBanner = status.success
+    ? `<div style="padding:10px 12px; background:#e8f7ee; border:1px solid #b7e4c7; border-radius:6px; margin-bottom:12px; color:#1b5e20;">
+        ${status.success}
+      </div>`
+    : "";
+  const errorBanner = status.error
+    ? `<div style="padding:10px 12px; background:#fdecea; border:1px solid #f5c6cb; border-radius:6px; margin-bottom:12px; color:#842029;">
+        ${status.error}
+      </div>`
+    : "";
+  const currentFile = status.currentFile
+    ? `<p style="color:#555; margin-bottom:12px;">Current file: <code>${status.currentFile}</code></p>`
+    : "";
+
   return `<!doctype html>
 <html>
   <head><meta charset="utf-8"/><title>Fallback XLSX Upload</title></head>
@@ -195,7 +210,11 @@ function renderXlsxUploadPage() {
       <a href="/logout">Logout</a>
     </div>
     <h2>Fallback XLSX Upload</h2>
-    <form method="post" action="/api/admin/upload-xlsx" enctype="multipart/form-data" style="display:grid; gap:10px;">
+    ${successBanner}
+    ${errorBanner}
+    ${currentFile}
+    <p style="color:#555; font-size:14px;">First row must be column headers. Required: <code>reference_id</code> (VTEX seller id). Recommended: email, phone, legal_business_name, business_type, seller_share_percent, bank_account_number, bank_ifsc.</p>
+    <form method="post" action="/xlsx-upload" enctype="multipart/form-data" style="display:grid; gap:10px;">
       <input type="file" name="vendorFile" accept=".xlsx" required />
       <button type="submit">Upload XLSX to server</button>
     </form>
@@ -346,7 +365,15 @@ async function startPortal() {
   });
 
   app.get("/xlsx-upload", (_req, res) => {
-    res.type("html").send(renderXlsxUploadPage());
+    const status = {
+      success:
+        _req.query.success === "1"
+          ? `File uploaded successfully (${_req.query.count || "0"} vendor rows). Path: ${_req.query.path || ""}`
+          : "",
+      error: _req.query.error ? String(_req.query.error) : "",
+      currentFile: config.paths.vendorXlsxFile || "",
+    };
+    res.type("html").send(renderXlsxUploadPage(status));
   });
 
   async function saveSeller(req) {
@@ -439,20 +466,44 @@ async function startPortal() {
     }
   });
 
-  app.post("/api/admin/upload-xlsx", upload.single("vendorFile"), async (req, res) => {
+  async function handleXlsxUpload(req, res, { respondWithJson }) {
     try {
       if (!req.file) {
-        return res.status(400).json({ ok: false, message: "No file uploaded" });
+        const message = "No file uploaded";
+        if (respondWithJson) {
+          return res.status(400).json({ ok: false, message });
+        }
+        return res.redirect(303, `/xlsx-upload?error=${encodeURIComponent(message)}`);
       }
       const absolutePath = path.resolve(req.file.path);
       await updateEnvFile({ VENDOR_XLSX_FILE: absolutePath });
-      logger.info("Uploaded fallback XLSX and updated env", { path: absolutePath });
-      return res.json({ ok: true, vendorXlsxFile: absolutePath });
+      config.paths.vendorXlsxFile = absolutePath;
+      const vendorMap = loadVendorsByReferenceId(absolutePath);
+      const count = vendorMap.size;
+      logger.info("Uploaded fallback XLSX and updated env", { path: absolutePath, count });
+      if (respondWithJson) {
+        return res.json({ ok: true, vendorXlsxFile: absolutePath, vendorCount: count });
+      }
+      return res.redirect(
+        303,
+        `/xlsx-upload?success=1&count=${count}&path=${encodeURIComponent(absolutePath)}`
+      );
     } catch (error) {
       logger.error("Portal xlsx upload failed", { message: error.message });
-      return res.status(500).json({ ok: false, message: error.message });
+      if (respondWithJson) {
+        return res.status(500).json({ ok: false, message: error.message });
+      }
+      return res.redirect(303, `/xlsx-upload?error=${encodeURIComponent(error.message)}`);
     }
-  });
+  }
+
+  app.post("/xlsx-upload", upload.single("vendorFile"), (req, res) =>
+    handleXlsxUpload(req, res, { respondWithJson: false })
+  );
+
+  app.post("/api/admin/upload-xlsx", upload.single("vendorFile"), (req, res) =>
+    handleXlsxUpload(req, res, { respondWithJson: true })
+  );
 
   app.post("/job-runner/settings", async (req, res) => {
     try {
