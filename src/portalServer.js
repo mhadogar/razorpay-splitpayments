@@ -9,6 +9,7 @@ const config = require("./config");
 const logger = require("./logger");
 const { createVtexMasterdataClient } = require("./vtexMasterdataClient");
 const { loadVendorsByReferenceId } = require("./vendorExcelRepository");
+const { readJobRunStatus } = require("./jobRunStore");
 const { runCycle } = require("./index");
 
 function renderForm() {
@@ -106,6 +107,7 @@ function renderJobRunnerPage(status = {}) {
         ${status.error}
       </div>`
     : "";
+  const initialStatusJson = JSON.stringify(status.jobStatus || null).replace(/</g, "\\u003c");
 
   return `<!doctype html>
 <html>
@@ -116,10 +118,24 @@ function renderJobRunnerPage(status = {}) {
       <a href="/logout">Logout</a>
     </div>
     <h2>Job Runner</h2>
-    <p>Transfers run only for captured payments after hold period. Keep <strong>HOLD_DAYS=15</strong> for refund safety.</p>
+    <p>Transfers run only for <strong>captured</strong> payments after the hold period (min <strong>15 days</strong>). Splits use <strong>product subtotal</strong>; shipping stays with the marketplace.</p>
     ${successBanner}
     ${errorBanner}
+
+    <section style="border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:24px; background:#fafafa;">
+      <h3 style="margin-top:0;">Run status</h3>
+      <div id="job-status-panel" style="display:grid; gap:8px; font-size:14px; color:#333;">
+        <p style="margin:0; color:#666;">Loading status…</p>
+      </div>
+      <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;">
+        <button type="button" id="run-job-btn" style="padding:10px 18px; cursor:pointer;">Run now</button>
+        <button type="button" id="refresh-status-btn" style="padding:10px 18px; cursor:pointer;">Refresh status</button>
+      </div>
+      <p id="run-job-hint" style="margin:12px 0 0; font-size:13px; color:#666;"></p>
+    </section>
+
     <form method="post" action="/job-runner/settings" style="display:grid; gap:10px; margin-bottom:28px;">
+      <h3 style="margin:0;">Schedule settings</h3>
       <label style="display:grid; gap:4px;">
         <span>HOLD_DAYS</span>
         <input name="holdDays" value="${config.settlement.holdDays}" required />
@@ -128,13 +144,121 @@ function renderJobRunnerPage(status = {}) {
         <span>SCHEDULER_CRON</span>
         <input name="schedulerCron" value="${config.scheduler.cron}" required />
       </label>
-      <small style="color:#555;">Cron example: <code>0 2 * * *</code> = run daily at 02:00 server time.</small>
-      <button type="submit">Save Job Schedule</button>
+      <small style="color:#555;">Cron example: <code>0 2 * * *</code> = daily at 02:00 server time. After saving, restart the scheduler process on the server.</small>
+      <button type="submit">Save schedule</button>
     </form>
 
-    <form method="post" action="/job-runner/run-now">
-      <button type="submit">Run Now</button>
-    </form>
+    <script>
+      const initialStatus = ${initialStatusJson};
+      const statusPanel = document.getElementById("job-status-panel");
+      const runBtn = document.getElementById("run-job-btn");
+      const refreshBtn = document.getElementById("refresh-status-btn");
+      const runHint = document.getElementById("run-job-hint");
+      let pollTimer = null;
+
+      function formatInr(paise) {
+        if (paise == null || paise === "") return "—";
+        return "₹" + (Number(paise) / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+
+      function statusBadge(status) {
+        const colors = {
+          running: { bg: "#fff8e1", border: "#ffe082", text: "#7a5c00", label: "Running" },
+          success: { bg: "#e8f7ee", border: "#b7e4c7", text: "#1b5e20", label: "Completed" },
+          failed: { bg: "#fdecea", border: "#f5c6cb", text: "#842029", label: "Failed" },
+          skipped: { bg: "#eef2ff", border: "#c7d2fe", text: "#3730a3", label: "Skipped" },
+        };
+        const style = colors[status] || { bg: "#f5f5f5", border: "#ddd", text: "#333", label: status || "Unknown" };
+        return '<span style="display:inline-block;padding:4px 10px;border-radius:999px;background:' + style.bg + ";border:1px solid " + style.border + ";color:" + style.text + ';font-weight:600;">' + style.label + "</span>";
+      }
+
+      function renderJobStatus(payload) {
+        const job = payload && payload.lastRun ? payload.lastRun : null;
+        const configInfo = payload && payload.config ? payload.config : {};
+        if (!job) {
+          statusPanel.innerHTML = '<p style="margin:0;color:#666;">No job has run yet. Click <strong>Run now</strong> to start.</p>';
+          return;
+        }
+
+        let html = "";
+        html += "<div><strong>Status:</strong> " + statusBadge(job.status) + "</div>";
+        if (job.triggeredBy) html += "<div><strong>Triggered by:</strong> " + job.triggeredBy + "</div>";
+        if (job.startedAt) html += "<div><strong>Started:</strong> " + new Date(job.startedAt).toLocaleString() + "</div>";
+        if (job.finishedAt) html += "<div><strong>Finished:</strong> " + new Date(job.finishedAt).toLocaleString() + "</div>";
+        if (job.message) html += "<div><strong>Message:</strong> " + job.message + "</div>";
+
+        if (job.stats) {
+          const s = job.stats;
+          html += '<div style="margin-top:8px;padding:10px;background:#fff;border:1px solid #eee;border-radius:6px;">';
+          html += "<div><strong>Payments fetched:</strong> " + (s.paymentsFetched ?? 0) + "</div>";
+          html += "<div><strong>With VTEX order:</strong> " + (s.paymentsWithVtexOrder ?? 0) + "</div>";
+          html += "<div><strong>Transferred this run:</strong> " + (s.paymentsTransferredThisRun ?? 0) + "</div>";
+          html += "<div><strong>Already transferred (skipped):</strong> " + (s.paymentsSkippedAlreadyTransferred ?? 0) + "</div>";
+          html += "<div><strong>Not eligible (hold/status/etc.):</strong> " + (s.paymentsSkippedNotEligible ?? 0) + "</div>";
+          html += "<div><strong>Errors:</strong> " + (s.paymentsFailed ?? 0) + "</div>";
+          if (Array.isArray(s.recentTransfers) && s.recentTransfers.length > 0) {
+            html += "<div style=\\"margin-top:8px;\\"><strong>Recent transfers</strong><ul style=\\"margin:6px 0 0;padding-left:18px;\\">";
+            for (const t of s.recentTransfers) {
+              html += "<li>Payment " + t.paymentId + " → sellers: " + t.sellerCount + ", seller total " + formatInr(t.totalSellerTransferAmount) + ", marketplace " + formatInr(t.marketplaceRetained) + "</li>";
+            }
+            html += "</ul></div>";
+          }
+          html += "</div>";
+        }
+
+        html += '<div style="margin-top:8px;font-size:13px;color:#666;">';
+        html += "Hold: " + (configInfo.holdDays ?? "—") + " days · Window: " + (configInfo.windowFromDaysAgo ?? "—") + "–" + (configInfo.windowToDaysAgo ?? "—") + " days ago · Cron: <code>" + (configInfo.schedulerCron ?? "—") + "</code>";
+        html += "</div>";
+
+        statusPanel.innerHTML = html;
+      }
+
+      function setRunningUi(running) {
+        runBtn.disabled = running;
+        runBtn.textContent = running ? "Running…" : "Run now";
+        runHint.textContent = running ? "Please wait while payments are fetched and transfers are processed." : "";
+      }
+
+      async function fetchStatus() {
+        const res = await fetch("/api/job-runner/status");
+        const data = await res.json();
+        renderJobStatus(data);
+        if (data.lastRun && data.lastRun.status === "running") {
+          setRunningUi(true);
+          if (!pollTimer) pollTimer = setInterval(fetchStatus, 3000);
+        } else {
+          setRunningUi(false);
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        }
+      }
+
+      runBtn.addEventListener("click", async () => {
+        setRunningUi(true);
+        statusPanel.innerHTML = '<p style="margin:0;color:#7a5c00;">Starting job…</p>';
+        try {
+          const res = await fetch("/api/job-runner/run", { method: "POST" });
+          const data = await res.json();
+          renderJobStatus({ lastRun: data, config: data.config });
+          if (data.status === "running") {
+            pollTimer = setInterval(fetchStatus, 3000);
+          } else {
+            setRunningUi(false);
+          }
+        } catch (err) {
+          statusPanel.innerHTML = '<p style="margin:0;color:#842029;">Run failed: ' + err.message + "</p>";
+          setRunningUi(false);
+        }
+      });
+
+      refreshBtn.addEventListener("click", fetchStatus);
+      renderJobStatus({ lastRun: initialStatus, config: {
+        holdDays: ${config.settlement.holdDays},
+        windowFromDaysAgo: ${config.scheduler.windowFromDaysAgo},
+        windowToDaysAgo: ${config.scheduler.windowToDaysAgo},
+        schedulerCron: ${JSON.stringify(config.scheduler.cron)},
+      }});
+      fetchStatus();
+    </script>
   </body>
 </html>`;
 }
@@ -356,12 +480,44 @@ async function startPortal() {
     res.type("html").send(renderEnvManagementPage());
   });
 
-  app.get("/job-runner", (req, res) => {
+  function buildJobRunnerConfigPayload() {
+    return {
+      holdDays: config.settlement.holdDays,
+      windowFromDaysAgo: config.scheduler.windowFromDaysAgo,
+      windowToDaysAgo: config.scheduler.windowToDaysAgo,
+      schedulerCron: config.scheduler.cron,
+      vtexEnabled: config.vtex.enabled,
+      vtexSellerFetchOnly: config.flow.vtexSellerFetchOnly,
+    };
+  }
+
+  app.get("/job-runner", async (req, res) => {
+    const lastRun = await readJobRunStatus(config.paths.jobRunStatusFile);
     const status = {
       success: req.query.success ? String(req.query.success) : "",
       error: req.query.error ? String(req.query.error) : "",
+      jobStatus: lastRun,
     };
     res.type("html").send(renderJobRunnerPage(status));
+  });
+
+  app.get("/api/job-runner/status", async (_req, res) => {
+    try {
+      const lastRun = await readJobRunStatus(config.paths.jobRunStatusFile);
+      res.json({ ok: true, lastRun, config: buildJobRunnerConfigPayload() });
+    } catch (error) {
+      res.status(500).json({ ok: false, message: error.message });
+    }
+  });
+
+  app.post("/api/job-runner/run", async (_req, res) => {
+    try {
+      const result = await runCycle({ triggeredBy: "manual" });
+      res.json({ ...result, config: buildJobRunnerConfigPayload() });
+    } catch (error) {
+      logger.error("Manual job run failed", { message: error.message });
+      res.status(500).json({ ok: false, status: "failed", message: error.message });
+    }
   });
 
   app.get("/xlsx-upload", (_req, res) => {
@@ -529,13 +685,7 @@ async function startPortal() {
   });
 
   app.post("/job-runner/run-now", async (_req, res) => {
-    try {
-      await runCycle();
-      return res.redirect(303, "/job-runner?success=Manual%20run%20completed");
-    } catch (error) {
-      logger.error("Manual run failed from portal", { message: error.message });
-      return res.redirect(303, `/job-runner?error=${encodeURIComponent(error.message)}`);
-    }
+    return res.redirect(303, "/job-runner");
   });
 
   app.listen(config.portal.port, () => {

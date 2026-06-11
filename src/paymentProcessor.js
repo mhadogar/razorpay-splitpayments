@@ -388,29 +388,44 @@ async function processPayments({
     maxPagesPerRun: config.scheduler.maxPagesPerRun,
   });
 
+  const stats = {
+    paymentsFetched: payments.length,
+    paymentsTransferredThisRun: 0,
+    paymentsSkippedAlreadyTransferred: 0,
+    paymentsSkippedNotEligible: 0,
+    paymentsWithVtexOrder: 0,
+    paymentsFailed: 0,
+    recentTransfers: [],
+  };
+
   let vendorPayloadChanged = false;
   for (const payment of payments) {
     if (!config.flow.vtexSellerFetchOnly) {
       if (!isCapturedPayment(payment)) {
+        stats.paymentsSkippedNotEligible += 1;
         continue;
       }
 
       if (!payment.order_id) {
         logger.warn("Skipping payment with no order_id", { paymentId: payment.id });
+        stats.paymentsSkippedNotEligible += 1;
         continue;
       }
 
       if (!isMature(payment.created_at, config.settlement.holdDays)) {
+        stats.paymentsSkippedNotEligible += 1;
         continue;
       }
 
       if (state.transferredPayments[payment.id]) {
+        stats.paymentsSkippedAlreadyTransferred += 1;
         continue;
       }
     }
 
     const vtexOrderId = extractVtexOrderId(payment);
     if (vtex.enabled && vtexOrderId) {
+      stats.paymentsWithVtexOrder += 1;
       try {
         const vtexOrder = await vtex.fetchOrder(vtexOrderId);
         logger.info("Fetched VTEX order full payload", {
@@ -658,11 +673,23 @@ async function processPayments({
           orderShippingTotal,
           transferResponse: transferRes,
         };
+        stats.paymentsTransferredThisRun += 1;
+        stats.recentTransfers.push({
+          paymentId: payment.id,
+          vtexOrderId,
+          sellerCount: transfers.length,
+          totalSellerTransferAmount,
+          marketplaceRetained,
+        });
+        if (stats.recentTransfers.length > 5) {
+          stats.recentTransfers.shift();
+        }
 
         if (config.flow.vtexSellerFetchOnly) {
           continue;
         }
       } catch (error) {
+        stats.paymentsFailed += 1;
         logger.error("Failed to derive splits from VTEX order", {
           paymentId: payment.id,
           vtexOrderId,
@@ -672,11 +699,12 @@ async function processPayments({
           continue;
         }
       }
+    } else {
+      stats.paymentsSkippedNotEligible += 1;
+      logger.warn("Skipping payment due to missing vtexOrderId or VTEX disabled", {
+        paymentId: payment.id,
+      });
     }
-
-    logger.warn("Skipping payment due to missing vtexOrderId or VTEX disabled", {
-      paymentId: payment.id,
-    });
   }
 
   if (vendorPayloadChanged) {
@@ -684,7 +712,7 @@ async function processPayments({
     logger.info("Persisted vendor mappings and linked account ids from VTEX sellers");
   }
 
-  return state;
+  return { state, stats };
 }
 
 module.exports = {

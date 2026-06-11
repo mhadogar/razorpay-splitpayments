@@ -7,6 +7,7 @@ const { createVtexMasterdataClient } = require("./vtexMasterdataClient");
 const { loadState, saveState, loadVendors } = require("./store");
 const { processPayments } = require("./paymentProcessor");
 const { ensureLinkedAccount } = require("./linkedAccountService");
+const { readJobRunStatus, writeJobRunStatus, isJobRunInProgress } = require("./jobRunStore");
 const fs = require("fs/promises");
 
 let isRunning = false;
@@ -133,13 +134,32 @@ async function syncVendorsFromMasterData(masterData, vendorPayload) {
   return hasUpdates;
 }
 
-async function runCycle() {
-  if (isRunning) {
-    logger.warn("Previous scheduler cycle still running, skipping this tick");
-    return;
+async function runCycle(options = {}) {
+  const triggeredBy = options.triggeredBy || "cron";
+  const statusFile = config.paths.jobRunStatusFile;
+
+  const existingStatus = await readJobRunStatus(statusFile);
+  if (isJobRunInProgress(existingStatus)) {
+    const message = "A job is already running";
+    logger.warn(message, { triggeredBy, startedAt: existingStatus.startedAt });
+    return { ok: false, status: "skipped", message, triggeredBy };
   }
 
+  if (isRunning) {
+    const message = "This process already has a job running";
+    logger.warn(message, { triggeredBy });
+    return { ok: false, status: "skipped", message, triggeredBy };
+  }
+
+  const startedAt = new Date().toISOString();
   isRunning = true;
+  await writeJobRunStatus(statusFile, {
+    status: "running",
+    startedAt,
+    triggeredBy,
+    message: "Job in progress…",
+  });
+
   try {
     const razorpay = createClient(config.razorpay.keyId, config.razorpay.keySecret, {
       logPayloads: config.logging.razorpayPayloads,
@@ -170,7 +190,7 @@ async function runCycle() {
     } else {
       logger.info("Skipping startup linked-account sync; seller-level sync will run inside payment loop");
     }
-    const nextState = await processPayments({
+    const { state: nextState, stats } = await processPayments({
       config,
       razorpay,
       vtex,
@@ -180,9 +200,32 @@ async function runCycle() {
     });
     await saveState(config.paths.stateFile, nextState);
 
-    logger.info("Scheduler cycle completed");
+    const finishedAt = new Date().toISOString();
+    const result = {
+      ok: true,
+      status: "success",
+      startedAt,
+      finishedAt,
+      triggeredBy,
+      message: "Scheduler cycle completed",
+      stats,
+    };
+    await writeJobRunStatus(statusFile, result);
+    logger.info("Scheduler cycle completed", { stats });
+    return result;
   } catch (error) {
+    const finishedAt = new Date().toISOString();
+    const result = {
+      ok: false,
+      status: "failed",
+      startedAt,
+      finishedAt,
+      triggeredBy,
+      message: error.message,
+    };
+    await writeJobRunStatus(statusFile, result);
     logger.error("Scheduler cycle failed", { message: error.message });
+    return result;
   } finally {
     isRunning = false;
   }
@@ -208,4 +251,5 @@ if (require.main === module) {
 module.exports = {
   runCycle,
   start,
+  isJobRunning: () => isRunning,
 };
