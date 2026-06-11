@@ -26,6 +26,73 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+const MAX_PAYMENT_DETAIL_ROWS = 100;
+
+function summarizePayment(payment) {
+  return {
+    paymentId: payment.id,
+    amount: payment.amount,
+    status: payment.status,
+    captured: payment.captured === true,
+    orderId: payment.order_id || null,
+    vtexOrderId: extractVtexOrderId(payment),
+    createdAt: payment.created_at,
+  };
+}
+
+function recordFetchedPayments(stats, payments) {
+  stats.fetchedPayments = payments.slice(0, MAX_PAYMENT_DETAIL_ROWS).map(summarizePayment);
+  if (payments.length > MAX_PAYMENT_DETAIL_ROWS) {
+    stats.fetchedPaymentsTruncated = payments.length - MAX_PAYMENT_DETAIL_ROWS;
+  }
+}
+
+function recordTransferredPayment(stats, entry) {
+  stats.transferredPayments.push(entry);
+  stats.recentTransfers.push(entry);
+  if (stats.transferredPayments.length > MAX_PAYMENT_DETAIL_ROWS) {
+    stats.transferredPayments.shift();
+  }
+  if (stats.recentTransfers.length > 5) {
+    stats.recentTransfers.shift();
+  }
+}
+
+function recordSkippedPayment(stats, payment, reason, detail = "", options = {}) {
+  const entry = {
+    paymentId: payment.id,
+    amount: payment.amount,
+    reason,
+    detail,
+    vtexOrderId: extractVtexOrderId(payment),
+  };
+  stats.skippedPayments.push(entry);
+  if (stats.skippedPayments.length > MAX_PAYMENT_DETAIL_ROWS) {
+    stats.skippedPayments.shift();
+  }
+  if (options.failed) {
+    stats.paymentsFailed += 1;
+  } else if (reason === "ALREADY_TRANSFERRED") {
+    stats.paymentsSkippedAlreadyTransferred += 1;
+  } else {
+    stats.paymentsSkippedNotEligible += 1;
+  }
+}
+
+function recordProcessedPayment(stats, payment, outcome, detail = "") {
+  const entry = {
+    paymentId: payment.id,
+    amount: payment.amount,
+    outcome,
+    detail,
+    vtexOrderId: extractVtexOrderId(payment),
+  };
+  stats.processedPayments.push(entry);
+  if (stats.processedPayments.length > MAX_PAYMENT_DETAIL_ROWS) {
+    stats.processedPayments.shift();
+  }
+}
+
 function buildVendorMap(vendors) {
   return new Map(vendors.map((vendor) => [vendor.vendorId, vendor]));
 }
@@ -395,30 +462,35 @@ async function processPayments({
     paymentsSkippedNotEligible: 0,
     paymentsWithVtexOrder: 0,
     paymentsFailed: 0,
+    fetchedPayments: [],
+    transferredPayments: [],
+    skippedPayments: [],
+    processedPayments: [],
     recentTransfers: [],
   };
+  recordFetchedPayments(stats, payments);
 
   let vendorPayloadChanged = false;
   for (const payment of payments) {
     if (!config.flow.vtexSellerFetchOnly) {
       if (!isCapturedPayment(payment)) {
-        stats.paymentsSkippedNotEligible += 1;
+        recordSkippedPayment(stats, payment, "NOT_CAPTURED");
         continue;
       }
 
       if (!payment.order_id) {
         logger.warn("Skipping payment with no order_id", { paymentId: payment.id });
-        stats.paymentsSkippedNotEligible += 1;
+        recordSkippedPayment(stats, payment, "NO_ORDER_ID");
         continue;
       }
 
       if (!isMature(payment.created_at, config.settlement.holdDays)) {
-        stats.paymentsSkippedNotEligible += 1;
+        recordSkippedPayment(stats, payment, "HOLD_NOT_MATURE");
         continue;
       }
 
       if (state.transferredPayments[payment.id]) {
-        stats.paymentsSkippedAlreadyTransferred += 1;
+        recordSkippedPayment(stats, payment, "ALREADY_TRANSFERRED");
         continue;
       }
     }
@@ -641,6 +713,7 @@ async function processPayments({
 
         if (transfers.length === 0) {
           logger.warn("No valid seller transfers prepared for payment", { paymentId: payment.id, vtexOrderId });
+          recordSkippedPayment(stats, payment, "NO_VALID_TRANSFERS", `vtexOrderId=${vtexOrderId}`);
           continue;
         }
 
@@ -650,6 +723,12 @@ async function processPayments({
             paymentAmount: payment.amount,
             totalSellerTransferAmount,
           });
+          recordSkippedPayment(
+            stats,
+            payment,
+            "TRANSFER_EXCEEDS_PAYMENT",
+            `sellerTotal=${totalSellerTransferAmount}, payment=${payment.amount}`
+          );
           continue;
         }
 
@@ -674,22 +753,19 @@ async function processPayments({
           transferResponse: transferRes,
         };
         stats.paymentsTransferredThisRun += 1;
-        stats.recentTransfers.push({
+        recordTransferredPayment(stats, {
           paymentId: payment.id,
           vtexOrderId,
           sellerCount: transfers.length,
           totalSellerTransferAmount,
           marketplaceRetained,
         });
-        if (stats.recentTransfers.length > 5) {
-          stats.recentTransfers.shift();
-        }
 
         if (config.flow.vtexSellerFetchOnly) {
           continue;
         }
       } catch (error) {
-        stats.paymentsFailed += 1;
+        recordSkippedPayment(stats, payment, "VTEX_PROCESSING_ERROR", error.message, { failed: true });
         logger.error("Failed to derive splits from VTEX order", {
           paymentId: payment.id,
           vtexOrderId,
@@ -700,7 +776,8 @@ async function processPayments({
         }
       }
     } else {
-      stats.paymentsSkippedNotEligible += 1;
+      const reason = !vtex.enabled ? "VTEX_DISABLED" : "NO_VTEX_ORDER_ID";
+      recordSkippedPayment(stats, payment, reason);
       logger.warn("Skipping payment due to missing vtexOrderId or VTEX disabled", {
         paymentId: payment.id,
       });

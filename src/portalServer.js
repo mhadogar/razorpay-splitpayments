@@ -217,13 +217,7 @@ function renderJobRunnerPage(status = {}) {
           html += "<div><strong>Already transferred (skipped):</strong> " + (s.paymentsSkippedAlreadyTransferred ?? 0) + "</div>";
           html += "<div><strong>Not eligible (hold/status/etc.):</strong> " + (s.paymentsSkippedNotEligible ?? 0) + "</div>";
           html += "<div><strong>Errors:</strong> " + (s.paymentsFailed ?? 0) + "</div>";
-          if (Array.isArray(s.recentTransfers) && s.recentTransfers.length > 0) {
-            html += "<div style=\\"margin-top:8px;\\"><strong>Recent transfers</strong><ul style=\\"margin:6px 0 0;padding-left:18px;\\">";
-            for (const t of s.recentTransfers) {
-              html += "<li>Payment " + t.paymentId + " → sellers: " + t.sellerCount + ", seller total " + formatInr(t.totalSellerTransferAmount) + ", marketplace " + formatInr(t.marketplaceRetained) + "</li>";
-            }
-            html += "</ul></div>";
-          }
+          html += renderPaymentDetails(s);
           html += "</div>";
         }
 
@@ -250,6 +244,111 @@ function renderJobRunnerPage(status = {}) {
           .replace(/"/g, "&quot;");
       }
 
+      const SKIP_REASON_LABELS = {
+        NOT_CAPTURED: "Not captured",
+        NO_ORDER_ID: "No Razorpay order ID",
+        HOLD_NOT_MATURE: "Hold period not met",
+        ALREADY_TRANSFERRED: "Already transferred",
+        NO_VTEX_ORDER_ID: "No VTEX order in notes",
+        VTEX_DISABLED: "VTEX integration disabled",
+        NO_VALID_TRANSFERS: "No valid seller transfers",
+        TRANSFER_EXCEEDS_PAYMENT: "Transfer total exceeds payment",
+        VTEX_PROCESSING_ERROR: "VTEX/processing error",
+      };
+
+      function skipReasonLabel(reason) {
+        return SKIP_REASON_LABELS[reason] || reason || "—";
+      }
+
+      function renderMiniPaymentTable(headers, rows) {
+        if (!rows.length) {
+          return '<p style="margin:6px 0 0;color:#888;font-size:12px;">None in this run.</p>';
+        }
+        let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px;">';
+        html += "<thead><tr>";
+        for (const header of headers) {
+          html += '<th style="text-align:left;padding:4px 6px;border-bottom:1px solid #ddd;">' + header + "</th>";
+        }
+        html += "</tr></thead><tbody>";
+        for (const row of rows) {
+          html += "<tr>";
+          for (const cell of row) {
+            html += '<td style="padding:4px 6px;border-bottom:1px solid #f0f0f0;vertical-align:top;">' + cell + "</td>";
+          }
+          html += "</tr>";
+        }
+        html += "</tbody></table>";
+        return html;
+      }
+
+      function renderPaymentDetails(stats) {
+        if (!stats) return "";
+        const fetched = Array.isArray(stats.fetchedPayments) ? stats.fetchedPayments : [];
+        const transferred = Array.isArray(stats.transferredPayments)
+          ? stats.transferredPayments
+          : Array.isArray(stats.recentTransfers)
+            ? stats.recentTransfers
+            : [];
+        const skipped = Array.isArray(stats.skippedPayments) ? stats.skippedPayments : [];
+        const hasDetails = fetched.length || transferred.length || skipped.length;
+        if (!hasDetails && !stats.fetchedPaymentsTruncated) return "";
+
+        let html = '<details style="margin-top:10px;"><summary style="cursor:pointer;font-weight:600;">Payment breakdown for this run</summary>';
+        html += '<div style="margin-top:10px;display:grid;gap:12px;">';
+
+        const fetchedCount = stats.paymentsFetched ?? fetched.length;
+        html += "<details><summary><strong>Fetched</strong> (" + fetchedCount + ")</summary>";
+        if (stats.fetchedPaymentsTruncated) {
+          html += '<p style="margin:6px 0 0;font-size:12px;color:#888;">Showing first ' + fetched.length + " of " + fetchedCount + " payments.</p>";
+        }
+        html += renderMiniPaymentTable(
+          ["Payment ID", "Amount", "Status", "VTEX order", "Created"],
+          fetched.map(function (p) {
+            return [
+              escapeHtml(p.paymentId),
+              formatInr(p.amount),
+              escapeHtml(p.captured ? "captured" : p.status || "—"),
+              escapeHtml(p.vtexOrderId || "—"),
+              p.createdAt ? escapeHtml(new Date(p.createdAt * 1000).toLocaleString()) : "—",
+            ];
+          })
+        );
+        html += "</details>";
+
+        html += "<details><summary><strong>Transferred</strong> (" + (stats.paymentsTransferredThisRun ?? transferred.length) + ")</summary>";
+        html += renderMiniPaymentTable(
+          ["Payment ID", "VTEX order", "Sellers", "Seller total", "Marketplace kept"],
+          transferred.map(function (p) {
+            return [
+              escapeHtml(p.paymentId),
+              escapeHtml(p.vtexOrderId || "—"),
+              escapeHtml(p.sellerCount ?? "—"),
+              formatInr(p.totalSellerTransferAmount),
+              formatInr(p.marketplaceRetained),
+            ];
+          })
+        );
+        html += "</details>";
+
+        const skippedCount = (stats.paymentsSkippedAlreadyTransferred ?? 0) + (stats.paymentsSkippedNotEligible ?? 0) + (stats.paymentsFailed ?? 0);
+        html += "<details><summary><strong>Skipped / failed</strong> (" + (skipped.length || skippedCount) + ")</summary>";
+        html += renderMiniPaymentTable(
+          ["Payment ID", "Amount", "Reason", "Detail"],
+          skipped.map(function (p) {
+            return [
+              escapeHtml(p.paymentId),
+              formatInr(p.amount),
+              escapeHtml(skipReasonLabel(p.reason)),
+              escapeHtml(p.detail || p.vtexOrderId || "—"),
+            ];
+          })
+        );
+        html += "</details>";
+
+        html += "</div></details>";
+        return html;
+      }
+
       function renderJobHistory(history) {
         const rows = Array.isArray(history) ? history : [];
         if (rows.length === 0) {
@@ -272,6 +371,7 @@ function renderJobRunnerPage(status = {}) {
         for (const row of rows) {
           const s = row.stats || {};
           const skipped = (s.paymentsSkippedAlreadyTransferred ?? 0) + (s.paymentsSkippedNotEligible ?? 0);
+          const paymentDetailsHtml = renderPaymentDetails(s);
           const finishedLabel = row.finishedAt ? new Date(row.finishedAt).toLocaleString() : "—";
           html += '<tr style="border-bottom:1px solid #eee;vertical-align:top;">';
           html += '<td style="padding:8px 6px;white-space:nowrap;">' + escapeHtml(finishedLabel) + "</td>";
@@ -283,16 +383,10 @@ function renderJobRunnerPage(status = {}) {
           html += '<td style="padding:8px 6px;">' + (s.paymentsFailed ?? "—") + "</td>";
           html += '<td style="padding:8px 6px;">' + formatDuration(row.startedAt, row.finishedAt) + "</td>";
           html += "</tr>";
-          if (row.message || (s.recentTransfers && s.recentTransfers.length)) {
-            html += '<tr><td colspan="8" style="padding:0 6px 10px 6px;color:#555;font-size:12px;">';
+          if (row.message || paymentDetailsHtml) {
+            html += '<tr><td colspan="8" style="padding:0 6px 12px 6px;color:#555;font-size:12px;">';
             if (row.message) html += "<div><strong>Note:</strong> " + escapeHtml(row.message) + "</div>";
-            if (s.recentTransfers && s.recentTransfers.length) {
-              html += "<div style=\\"margin-top:4px;\\"><strong>Transfers:</strong> ";
-              html += s.recentTransfers.map(function (t) {
-                return escapeHtml(t.paymentId) + " (" + t.sellerCount + " sellers, " + formatInr(t.totalSellerTransferAmount) + ")";
-              }).join("; ");
-              html += "</div>";
-            }
+            html += paymentDetailsHtml;
             html += "</td></tr>";
           }
         }
