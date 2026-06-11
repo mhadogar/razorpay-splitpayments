@@ -9,7 +9,7 @@ const config = require("./config");
 const logger = require("./logger");
 const { createVtexMasterdataClient } = require("./vtexMasterdataClient");
 const { loadVendorsByReferenceId } = require("./vendorExcelRepository");
-const { readJobRunStatus } = require("./jobRunStore");
+const { readJobRunStatus, readJobRunHistory } = require("./jobRunStore");
 const { runCycle } = require("./index");
 
 function renderForm() {
@@ -134,6 +134,14 @@ function renderJobRunnerPage(status = {}) {
       <p id="run-job-hint" style="margin:12px 0 0; font-size:13px; color:#666;"></p>
     </section>
 
+    <section style="border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:24px;">
+      <h3 style="margin-top:0;">Run history</h3>
+      <p style="margin:0 0 12px; font-size:13px; color:#666;">Every completed, failed, or skipped cycle (manual and scheduled).</p>
+      <div id="job-history-panel" style="overflow-x:auto;">
+        <p style="margin:0; color:#666;">Loading history…</p>
+      </div>
+    </section>
+
     <form method="post" action="/job-runner/settings" style="display:grid; gap:10px; margin-bottom:28px;">
       <h3 style="margin:0;">Schedule settings</h3>
       <label style="display:grid; gap:4px;">
@@ -151,6 +159,7 @@ function renderJobRunnerPage(status = {}) {
     <script>
       const initialStatus = ${initialStatusJson};
       const statusPanel = document.getElementById("job-status-panel");
+      const historyPanel = document.getElementById("job-history-panel");
       const runBtn = document.getElementById("run-job-btn");
       const refreshBtn = document.getElementById("refresh-status-btn");
       const runHint = document.getElementById("run-job-hint");
@@ -213,6 +222,73 @@ function renderJobRunnerPage(status = {}) {
         statusPanel.innerHTML = html;
       }
 
+      function formatDuration(startedAt, finishedAt) {
+        if (!startedAt || !finishedAt) return "—";
+        const ms = new Date(finishedAt) - new Date(startedAt);
+        if (!Number.isFinite(ms) || ms < 0) return "—";
+        if (ms < 1000) return ms + " ms";
+        return (ms / 1000).toFixed(1) + " s";
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      function renderJobHistory(history) {
+        const rows = Array.isArray(history) ? history : [];
+        if (rows.length === 0) {
+          historyPanel.innerHTML = '<p style="margin:0;color:#666;">No history yet. Runs will appear here after the first cycle.</p>';
+          return;
+        }
+
+        let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+        html += "<thead><tr style=\\"text-align:left;border-bottom:2px solid #ddd;\\">";
+        html += "<th style=\\"padding:8px 6px;\\">Finished</th>";
+        html += "<th style=\\"padding:8px 6px;\\">Status</th>";
+        html += "<th style=\\"padding:8px 6px;\\">Trigger</th>";
+        html += "<th style=\\"padding:8px 6px;\\">Fetched</th>";
+        html += "<th style=\\"padding:8px 6px;\\">Transferred</th>";
+        html += "<th style=\\"padding:8px 6px;\\">Skipped</th>";
+        html += "<th style=\\"padding:8px 6px;\\">Errors</th>";
+        html += "<th style=\\"padding:8px 6px;\\">Duration</th>";
+        html += "</tr></thead><tbody>";
+
+        for (const row of rows) {
+          const s = row.stats || {};
+          const skipped = (s.paymentsSkippedAlreadyTransferred ?? 0) + (s.paymentsSkippedNotEligible ?? 0);
+          const finishedLabel = row.finishedAt ? new Date(row.finishedAt).toLocaleString() : "—";
+          html += '<tr style="border-bottom:1px solid #eee;vertical-align:top;">';
+          html += '<td style="padding:8px 6px;white-space:nowrap;">' + escapeHtml(finishedLabel) + "</td>";
+          html += '<td style="padding:8px 6px;">' + statusBadge(row.status) + "</td>";
+          html += '<td style="padding:8px 6px;">' + escapeHtml(row.triggeredBy || "—") + "</td>";
+          html += '<td style="padding:8px 6px;">' + (s.paymentsFetched ?? "—") + "</td>";
+          html += '<td style="padding:8px 6px;">' + (s.paymentsTransferredThisRun ?? "—") + "</td>";
+          html += '<td style="padding:8px 6px;">' + (row.stats ? skipped : "—") + "</td>";
+          html += '<td style="padding:8px 6px;">' + (s.paymentsFailed ?? "—") + "</td>";
+          html += '<td style="padding:8px 6px;">' + formatDuration(row.startedAt, row.finishedAt) + "</td>";
+          html += "</tr>";
+          if (row.message || (s.recentTransfers && s.recentTransfers.length)) {
+            html += '<tr><td colspan="8" style="padding:0 6px 10px 6px;color:#555;font-size:12px;">';
+            if (row.message) html += "<div><strong>Note:</strong> " + escapeHtml(row.message) + "</div>";
+            if (s.recentTransfers && s.recentTransfers.length) {
+              html += "<div style=\\"margin-top:4px;\\"><strong>Transfers:</strong> ";
+              html += s.recentTransfers.map(function (t) {
+                return escapeHtml(t.paymentId) + " (" + t.sellerCount + " sellers, " + formatInr(t.totalSellerTransferAmount) + ")";
+              }).join("; ");
+              html += "</div>";
+            }
+            html += "</td></tr>";
+          }
+        }
+
+        html += "</tbody></table>";
+        historyPanel.innerHTML = html;
+      }
+
       function setRunningUi(running) {
         runBtn.disabled = running;
         runBtn.textContent = running ? "Running…" : "Run now";
@@ -223,6 +299,7 @@ function renderJobRunnerPage(status = {}) {
         const res = await fetch("/api/job-runner/status");
         const data = await res.json();
         renderJobStatus(data);
+        renderJobHistory(data.history);
         if (data.lastRun && data.lastRun.status === "running") {
           setRunningUi(true);
           if (!pollTimer) pollTimer = setInterval(fetchStatus, 3000);
@@ -238,7 +315,7 @@ function renderJobRunnerPage(status = {}) {
         try {
           const res = await fetch("/api/job-runner/run", { method: "POST" });
           const data = await res.json();
-          renderJobStatus({ lastRun: data, config: data.config });
+          await fetchStatus();
           if (data.status === "running") {
             pollTimer = setInterval(fetchStatus, 3000);
           } else {
@@ -504,7 +581,8 @@ async function startPortal() {
   app.get("/api/job-runner/status", async (_req, res) => {
     try {
       const lastRun = await readJobRunStatus(config.paths.jobRunStatusFile);
-      res.json({ ok: true, lastRun, config: buildJobRunnerConfigPayload() });
+      const history = await readJobRunHistory(config.paths.jobRunHistoryFile, 50);
+      res.json({ ok: true, lastRun, history, config: buildJobRunnerConfigPayload() });
     } catch (error) {
       res.status(500).json({ ok: false, message: error.message });
     }
@@ -513,7 +591,8 @@ async function startPortal() {
   app.post("/api/job-runner/run", async (_req, res) => {
     try {
       const result = await runCycle({ triggeredBy: "manual" });
-      res.json({ ...result, config: buildJobRunnerConfigPayload() });
+      const history = await readJobRunHistory(config.paths.jobRunHistoryFile, 50);
+      res.json({ ...result, history, config: buildJobRunnerConfigPayload() });
     } catch (error) {
       logger.error("Manual job run failed", { message: error.message });
       res.status(500).json({ ok: false, status: "failed", message: error.message });

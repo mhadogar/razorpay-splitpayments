@@ -7,7 +7,7 @@ const { createVtexMasterdataClient } = require("./vtexMasterdataClient");
 const { loadState, saveState, loadVendors } = require("./store");
 const { processPayments } = require("./paymentProcessor");
 const { ensureLinkedAccount } = require("./linkedAccountService");
-const { readJobRunStatus, writeJobRunStatus, isJobRunInProgress } = require("./jobRunStore");
+const { readJobRunStatus, recordJobRun, isJobRunInProgress } = require("./jobRunStore");
 const fs = require("fs/promises");
 
 let isRunning = false;
@@ -137,23 +137,37 @@ async function syncVendorsFromMasterData(masterData, vendorPayload) {
 async function runCycle(options = {}) {
   const triggeredBy = options.triggeredBy || "cron";
   const statusFile = config.paths.jobRunStatusFile;
+  const historyFile = config.paths.jobRunHistoryFile;
 
   const existingStatus = await readJobRunStatus(statusFile);
   if (isJobRunInProgress(existingStatus)) {
     const message = "A job is already running";
+    const finishedAt = new Date().toISOString();
+    const result = {
+      ok: false,
+      status: "skipped",
+      message,
+      triggeredBy,
+      startedAt: finishedAt,
+      finishedAt,
+    };
     logger.warn(message, { triggeredBy, startedAt: existingStatus.startedAt });
-    return { ok: false, status: "skipped", message, triggeredBy };
+    await recordJobRun(statusFile, historyFile, result);
+    return result;
   }
 
   if (isRunning) {
     const message = "This process already has a job running";
+    const finishedAt = new Date().toISOString();
+    const result = { ok: false, status: "skipped", message, triggeredBy, startedAt: finishedAt, finishedAt };
     logger.warn(message, { triggeredBy });
-    return { ok: false, status: "skipped", message, triggeredBy };
+    await recordJobRun(statusFile, historyFile, result);
+    return result;
   }
 
   const startedAt = new Date().toISOString();
   isRunning = true;
-  await writeJobRunStatus(statusFile, {
+  await recordJobRun(statusFile, historyFile, {
     status: "running",
     startedAt,
     triggeredBy,
@@ -210,7 +224,7 @@ async function runCycle(options = {}) {
       message: "Scheduler cycle completed",
       stats,
     };
-    await writeJobRunStatus(statusFile, result);
+    await recordJobRun(statusFile, historyFile, result);
     logger.info("Scheduler cycle completed", { stats });
     return result;
   } catch (error) {
@@ -223,7 +237,7 @@ async function runCycle(options = {}) {
       triggeredBy,
       message: error.message,
     };
-    await writeJobRunStatus(statusFile, result);
+    await recordJobRun(statusFile, historyFile, result);
     logger.error("Scheduler cycle failed", { message: error.message });
     return result;
   } finally {

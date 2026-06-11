@@ -53,6 +53,7 @@ const config = {
   paths: {
     stateFile: process.env.STATE_FILE || path.join(process.cwd(), "data", "state.json"),
     jobRunStatusFile: process.env.JOB_RUN_STATUS_FILE || path.join(process.cwd(), "data", "job-run-status.json"),
+    jobRunHistoryFile: process.env.JOB_RUN_HISTORY_FILE || path.join(process.cwd(), "data", "job-run-history.json"),
     vendorFile: process.env.VENDOR_FILE || path.join(process.cwd(), "data", "vendors.json"),
     vendorXlsxFile:
       process.env.VENDOR_XLSX_FILE || "/Users/mhadogar/Downloads/coffeesooq_vendor_information (2).xlsx",
