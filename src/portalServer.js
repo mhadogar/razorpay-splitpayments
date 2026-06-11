@@ -12,12 +12,24 @@ const { loadVendorsByReferenceId } = require("./vendorExcelRepository");
 const { readJobRunStatus, readJobRunHistory } = require("./jobRunStore");
 const { runCycle } = require("./index");
 
-function renderForm() {
+function renderForm(status = {}) {
+  const successBanner = status.success
+    ? `<div style="padding:10px 12px; background:#e8f7ee; border:1px solid #b7e4c7; border-radius:6px; margin-bottom:12px; color:#1b5e20;">
+        ${status.success}
+      </div>`
+    : "";
+  const errorBanner = status.error
+    ? `<div style="padding:10px 12px; background:#fdecea; border:1px solid #f5c6cb; border-radius:6px; margin-bottom:12px; color:#842029;">
+        ${status.error}
+      </div>`
+    : "";
   return `<!doctype html>
 <html>
   <head><meta charset="utf-8"/><title>Seller Onboarding Portal</title></head>
   <body style="font-family: Arial, sans-serif; max-width: 760px; margin: 24px auto;">
     <h2>CoffeeSooq Split Payments Admin</h2>
+    ${successBanner}
+    ${errorBanner}
     <p>Manage seller onboarding (SE2), runtime .env config and fallback XLSX upload.</p>
     <div style="display:grid; gap:12px; max-width:380px;">
       <a href="/seller-registration" style="padding:10px 14px; border:1px solid #ccc; border-radius:6px; text-decoration:none;">Seller Registration</a>
@@ -340,7 +352,12 @@ function renderJobRunnerPage(status = {}) {
 </html>`;
 }
 
-function renderEnvManagementPage() {
+function renderEnvManagementPage(status = {}) {
+  const errorBanner = status.error
+    ? `<div style="padding:10px 12px; background:#fdecea; border:1px solid #f5c6cb; border-radius:6px; margin-bottom:12px; color:#842029;">
+        ${status.error}
+      </div>`
+    : "";
   const envFormFields = [
     "RAZORPAY_KEY_ID",
     "RAZORPAY_KEY_SECRET",
@@ -374,7 +391,8 @@ function renderEnvManagementPage() {
       <a href="/logout">Logout</a>
     </div>
     <h2>Environment Management (.env)</h2>
-    <form method="post" action="/api/admin/env" style="display:grid; gap:10px; margin-bottom:28px;">
+    ${errorBanner}
+    <form method="post" action="/env-management" style="display:grid; gap:10px; margin-bottom:28px;">
       ${envFormFields
         .map(
           (field) =>
@@ -540,8 +558,12 @@ async function startPortal() {
 
   app.use(requireAuth);
 
-  app.get("/", (_req, res) => {
-    res.type("html").send(renderForm());
+  app.get("/", (req, res) => {
+    const status = {
+      success: req.query.envSaved === "1" ? "Environment settings saved successfully." : "",
+      error: req.query.error ? String(req.query.error) : "",
+    };
+    res.type("html").send(renderForm(status));
   });
 
   app.get("/seller-registration", (_req, res) => {
@@ -553,8 +575,8 @@ async function startPortal() {
     res.type("html").send(renderSellerRegistrationPage(status));
   });
 
-  app.get("/env-management", (_req, res) => {
-    res.type("html").send(renderEnvManagementPage());
+  app.get("/env-management", (req, res) => {
+    res.type("html").send(renderEnvManagementPage({ error: req.query.error ? String(req.query.error) : "" }));
   });
 
   function buildJobRunnerConfigPayload() {
@@ -680,20 +702,40 @@ async function startPortal() {
     }
   });
 
+  function collectEnvUpdates(body) {
+    const updates = {};
+    for (const [key, value] of Object.entries(body || {})) {
+      if (!String(key).trim()) {
+        continue;
+      }
+      if (String(value || "").trim() === "") {
+        continue;
+      }
+      updates[key] = String(value).trim();
+    }
+    return updates;
+  }
+
+  async function saveEnvFromRequest(req) {
+    const updates = collectEnvUpdates(req.body);
+    await updateEnvFile(updates);
+    logger.info("Updated .env through portal", { updatedKeys: Object.keys(updates) });
+    return updates;
+  }
+
+  app.post("/env-management", async (req, res) => {
+    try {
+      await saveEnvFromRequest(req);
+      return res.redirect(303, "/?envSaved=1");
+    } catch (error) {
+      logger.error("Portal env update failed", { message: error.message });
+      return res.redirect(303, `/env-management?error=${encodeURIComponent(error.message)}`);
+    }
+  });
+
   app.post("/api/admin/env", async (req, res) => {
     try {
-      const updates = {};
-      for (const [key, value] of Object.entries(req.body || {})) {
-        if (!String(key).trim()) {
-          continue;
-        }
-        if (String(value || "").trim() === "") {
-          continue;
-        }
-        updates[key] = String(value).trim();
-      }
-      await updateEnvFile(updates);
-      logger.info("Updated .env through portal", { updatedKeys: Object.keys(updates) });
+      const updates = await saveEnvFromRequest(req);
       res.json({ ok: true, updatedKeys: Object.keys(updates) });
     } catch (error) {
       logger.error("Portal env update failed", { message: error.message });
